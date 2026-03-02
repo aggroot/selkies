@@ -39,8 +39,8 @@ try:
     gi.require_version('GstSdp', "1.0")
     gi.require_version('GstWebRTC', "1.0")
     from gi.repository import GLib, Gst, GstRtp, GstSdp, GstWebRTC
-    fract = Gst.Fraction(60, 1)
-    del fract
+    # Verify GStreamer is functional (Gst.init is called later in __main__)
+    Gst.init(None)
 except Exception as e:
     msg = """ERROR: could not find working GStreamer-Python installation.
 
@@ -65,7 +65,7 @@ class GSTWebRTCAppError(Exception):
     pass
 
 class GSTWebRTCApp:
-    def __init__(self, stun_servers=None, turn_servers=None, audio_channels=2, framerate=30, encoder=None, gpu_id=0, video_bitrate=2000, audio_bitrate=96000, keyframe_distance=-1.0, congestion_control=False, video_packetloss_percent=0.0, audio_packetloss_percent=0.0):
+    def __init__(self, stun_servers=None, turn_servers=None, audio_channels=2, framerate=30, encoder=None, gpu_id=0, video_bitrate=2000, audio_bitrate=96000, keyframe_distance=-1.0, congestion_control=False, video_packetloss_percent=0.0, audio_packetloss_percent=0.0, public_ip=None, udp_min_port=0, udp_max_port=0):
         """Initialize GStreamer WebRTC app.
 
         Initializes GObjects and checks for required plugins.
@@ -79,6 +79,9 @@ class GSTWebRTCApp:
 
         self.stun_servers = stun_servers
         self.turn_servers = turn_servers
+        self.public_ip = public_ip
+        self.udp_min_port = udp_min_port
+        self.udp_max_port = udp_max_port
         self.audio_channels = audio_channels
         self.pipeline = None
         self.webrtcbin = None
@@ -176,9 +179,9 @@ class GSTWebRTCApp:
         self.webrtcbin.connect('on-ice-candidate', lambda webrtcbin, mlineindex,
                                candidate: self.__send_ice(webrtcbin, mlineindex, candidate))
 
-        # Add STUN server
+        # Add STUN server (skip when public_ip is set — we inject our own srflx candidates)
         # TODO: figure out how to add more than one STUN server.
-        if self.stun_servers:
+        if self.stun_servers and not self.public_ip:
             logger.info("updating STUN server")
             self.webrtcbin.set_property("stun-server", self.stun_servers[0])
 
@@ -193,6 +196,19 @@ class GSTWebRTCApp:
 
         # Add element to the pipeline.
         self.pipeline.add(self.webrtcbin)
+
+        # Constrain ICE agent port range
+        # Must keep reference on self until pipeline stops — GI will unref the
+        # GObject if the local goes out of scope before pipeline reaches PLAYING.
+        # Cleaned up in stop_pipeline() so rebuilds get a fresh ICE agent.
+        if self.udp_min_port > 0 or self.udp_max_port > 0:
+            self._ice_agent_ref = self.webrtcbin.get_property("ice-agent")
+            if self.udp_min_port > 0:
+                self._ice_agent_ref.props.min_rtp_port = self.udp_min_port
+                logger.info("ICE agent min-rtp-port set to %d", self.udp_min_port)
+            if self.udp_max_port > 0:
+                self._ice_agent_ref.props.max_rtp_port = self.udp_max_port
+                logger.info("ICE agent max-rtp-port set to %d", self.udp_max_port)
     # [END build_webrtcbin_pipeline]
 
     # [START build_video_pipeline]
@@ -247,7 +263,7 @@ class GSTWebRTCApp:
         # The higher the FPS, the lower the latency so this parameter is one
         # way to set the overall target latency of the pipeline though keep in
         # mind that the pipeline may not always perform at the full 60 FPS.
-        self.ximagesrc_caps.set_value("framerate", Gst.Fraction(self.framerate, 1))
+        self.ximagesrc_caps = Gst.caps_from_string("video/x-raw,framerate={}/1".format(self.framerate))
 
         # Create a capability filter for the ximagesrc_caps
         self.ximagesrc_capsfilter = Gst.ElementFactory.make("capsfilter")
@@ -1260,8 +1276,7 @@ class GSTWebRTCApp:
             else:
                 logger.warning("setting keyframe interval (GOP size) not supported with encoder: %s" % self.encoder)
 
-            self.ximagesrc_caps = Gst.caps_from_string("video/x-raw")
-            self.ximagesrc_caps.set_value("framerate", Gst.Fraction(self.framerate, 1))
+            self.ximagesrc_caps = Gst.caps_from_string("video/x-raw,framerate={}/1".format(self.framerate))
             self.ximagesrc_capsfilter.set_property("caps", self.ximagesrc_caps)
             logger.info("framerate set to: %d" % framerate)
 
@@ -1649,6 +1664,34 @@ class GSTWebRTCApp:
             candidate {string} -- ice candidate string
         """
         logger.debug("received ICE candidate: %d %s", mlineindex, candidate)
+
+        if self.public_ip and "typ host" in candidate:
+            # Replace host candidates with synthetic srflx using public IP
+            parts = candidate.split()
+            if len(parts) >= 8:
+                orig_addr = parts[4]
+                orig_port = parts[5]
+                orig_priority = int(parts[3])
+                # Compute srflx priority: shift type preference from host(126) to srflx(100)
+                srflx_priority = orig_priority - (26 << 24)  # 26 * 16777216 = 436207616
+                if srflx_priority < 0:
+                    srflx_priority = 1
+                # Build srflx candidate
+                srflx = "candidate:{} {} {} {} {} {} typ srflx raddr {} rport {}".format(
+                    parts[0].split(":")[1],  # foundation
+                    parts[1],  # component-id
+                    parts[2],  # transport (UDP)
+                    srflx_priority,
+                    self.public_ip,
+                    orig_port,  # same port (Docker maps it)
+                    orig_addr,
+                    orig_port
+                )
+                logger.info("injecting srflx candidate: %s", srflx)
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(self.on_ice(mlineindex, srflx))
+                return  # suppress original host candidate
+
         loop = asyncio.new_event_loop()
         loop.run_until_complete(self.on_ice(mlineindex, candidate))
 
@@ -1683,25 +1726,30 @@ class GSTWebRTCApp:
         self.pipeline = Gst.Pipeline.new()
 
         # Construct the webrtcbin pipeline
+        logger.info("building webrtcbin pipeline")
         self.build_webrtcbin_pipeline(audio_only)
+        logger.info("webrtcbin pipeline built")
 
         if audio_only:
             self.build_audio_pipeline()
         else:
+            logger.info("building video pipeline")
             self.build_video_pipeline()
+            logger.info("video pipeline built")
 
         # Advance the state of the pipeline to PLAYING.
+        logger.info("setting pipeline state to PLAYING")
         res = self.pipeline.set_state(Gst.State.PLAYING)
-        if res != Gst.StateChangeReturn.SUCCESS:
+        logger.info("pipeline state change result: %s" % res)
+        if res == Gst.StateChangeReturn.FAILURE:
             raise GSTWebRTCAppError(
                 "Failed to transition pipeline to PLAYING: %s" % res)
 
         if not audio_only:
             # Create the data channel, this has to be done after the pipeline is PLAYING.
-            options = Gst.Structure("application/data-channel")
-            options.set_value("ordered", True)
-            options.set_value("priority", "high")
-            options.set_value("max-retransmits", 0)
+            logger.info("creating data channel")
+            # GStreamer 1.26: Gst.Structure() creates immutable struct, use from_string
+            options, _ = Gst.Structure.from_string("application/data-channel,ordered=(boolean)true,max-retransmits=(int)0")
             self.data_channel = self.webrtcbin.emit(
                 'create-data-channel', "input", options)
             self.data_channel.connect('on-open', lambda _: self.on_data_open())
@@ -1737,6 +1785,8 @@ class GSTWebRTCApp:
             self.pipeline.set_state(Gst.State.NULL)
             self.pipeline = None
             logger.info("pipeline set to state NULL")
+        if hasattr(self, '_ice_agent_ref'):
+            del self._ice_agent_ref
         if self.webrtcbin:
             self.webrtcbin.set_state(Gst.State.NULL)
             self.webrtcbin = None

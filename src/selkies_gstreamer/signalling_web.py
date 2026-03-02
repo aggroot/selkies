@@ -476,9 +476,6 @@ class WebRTCSimpleServer(object):
         http_handler = functools.partial(self.process_request, self.web_root)
         self.stop_server = self.loop.create_future()
         async with websockets.serve(handler, self.addr, self.port, ssl=sslctx, process_request=http_handler, loop=self.loop,
-                               # Maximum number of messages that websockets will pop
-                               # off the asyncio and OS buffers per connection. See:
-                               # https://websockets.readthedocs.io/en/stable/api.html#websockets.protocol.WebSocketCommonProtocol
                                max_queue=16) as self.server:
             await self.stop_server
 

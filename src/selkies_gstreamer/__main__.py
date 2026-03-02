@@ -368,7 +368,7 @@ def main():
                         help='Header to pass TURN (D)TLS usage to TURN REST API service')
     parser.add_argument('--turn_host',
                         default=os.environ.get(
-                            'SELKIES_TURN_HOST', 'staticauth.openrelay.metered.ca'),
+                            'SELKIES_TURN_HOST', ''),
                         help='TURN host when generating RTC config from shared secret or using long-term credentials')
     parser.add_argument('--turn_port',
                         default=os.environ.get(
@@ -384,7 +384,7 @@ def main():
                         help='Enable or disable TURN over TLS (for the TCP protocol) or TURN over DTLS (for the UDP protocol), valid TURN server certificate required')
     parser.add_argument('--turn_shared_secret',
                         default=os.environ.get(
-                            'SELKIES_TURN_SHARED_SECRET', 'openrelayprojectsecret'),
+                            'SELKIES_TURN_SHARED_SECRET', ''),
                         help='Shared TURN secret used to generate HMAC credentials, also requires --turn_host and --turn_port')
     parser.add_argument('--turn_username',
                         default=os.environ.get(
@@ -394,6 +394,15 @@ def main():
                         default=os.environ.get(
                             'SELKIES_TURN_PASSWORD', ''),
                         help='Legacy non-HMAC TURN credential password, also requires --turn_host and --turn_port')
+    parser.add_argument('--public_ip',
+                        default=os.environ.get('SELKIES_PUBLIC_IP', ''),
+                        help='Public IP for WebRTC ICE candidates, replaces host candidates with srflx. Disables STUN on server when set.')
+    parser.add_argument('--udp_min_port',
+                        default=os.environ.get('SELKIES_UDP_MIN_PORT', '0'),
+                        help='Minimum UDP port for ICE (0 = any)')
+    parser.add_argument('--udp_max_port',
+                        default=os.environ.get('SELKIES_UDP_MAX_PORT', '0'),
+                        help='Maximum UDP port for ICE (0 = any)')
     parser.add_argument('--stun_host',
                         default=os.environ.get(
                             'SELKIES_STUN_HOST', 'stun.l.google.com'),
@@ -616,8 +625,8 @@ def main():
     audio_packetloss_percent = float(args.audio_packetloss_percent)
 
     # Create instance of app
-    app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
-    audio_app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
+    app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent, public_ip=args.public_ip or None, udp_min_port=int(args.udp_min_port), udp_max_port=int(args.udp_max_port))
+    audio_app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent, public_ip=args.public_ip or None, udp_min_port=int(args.udp_min_port), udp_max_port=int(args.udp_max_port))
 
     # [END main_setup]
 
@@ -640,23 +649,26 @@ def main():
     # Start the pipeline once the session is established.
     def on_session_handler(session_peer_id, meta=None):
         logger.info("starting session for peer id {} with meta: {}".format(session_peer_id, meta))
-        if str(session_peer_id) == str(peer_id):
-            if meta:
-                if enable_resize:
-                    if meta["res"]:
-                        on_resize_handler(meta["res"])
-                    if meta["scale"]:
-                        on_scaling_ratio_handler(meta["scale"])
-                else:
-                    logger.info("setting cursor to default size")
-                    set_cursor_size(16)
-            logger.info("starting video pipeline")
-            app.start_pipeline()
-        elif str(session_peer_id) == str(audio_peer_id):
-            logger.info("starting audio pipeline")
-            audio_app.start_pipeline(audio_only=True)
-        else:
-            logger.error("failed to start pipeline for peer_id: %s" % peer_id)
+        try:
+            if str(session_peer_id) == str(peer_id):
+                if meta:
+                    if enable_resize:
+                        if meta["res"]:
+                            on_resize_handler(meta["res"])
+                        if meta["scale"]:
+                            on_scaling_ratio_handler(meta["scale"])
+                    else:
+                        logger.info("setting cursor to default size")
+                        set_cursor_size(16)
+                logger.info("starting video pipeline")
+                app.start_pipeline()
+            elif str(session_peer_id) == str(audio_peer_id):
+                logger.info("starting audio pipeline")
+                audio_app.start_pipeline(audio_only=True)
+            else:
+                logger.error("failed to start pipeline for peer_id: %s" % peer_id)
+        except Exception as e:
+            logger.error("Exception in on_session_handler: %s" % e, exc_info=True)
 
     signalling.on_session = on_session_handler
     audio_signalling.on_session = on_session_handler
