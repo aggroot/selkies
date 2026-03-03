@@ -289,14 +289,18 @@ class WebRTCSimpleServer(object):
     #         logger.info('room {}: {} -> {}: {}'.format(room_id, uid, pid, msg))
     #         await wsp.send(msg)
 
-    async def remove_peer(self, uid):
+    async def remove_peer(self, uid, ws=None):
         await self.cleanup_session(uid)
         if uid in self.peers:
-            ws, raddr, status, _ = self.peers[uid]
+            current_ws, raddr, status, _ = self.peers[uid]
+            # Skip removal if a new connection already replaced this peer
+            if ws is not None and current_ws is not ws:
+                logger.info("Skipping stale remove_peer for {!r} (replaced by new connection)".format(uid))
+                return
             # if status and status != 'session':
             #     await self.cleanup_room(uid, status)
             del self.peers[uid]
-            await ws.close()
+            await current_ws.close()
             logger.info("Disconnected from peer {!r} at {!r}".format(uid, raddr))
 
     ############### Handler functions ###############
@@ -462,7 +466,7 @@ class WebRTCSimpleServer(object):
             except websockets.ConnectionClosed:
                 logger.info("Connection to peer {!r} closed, exiting handler".format(raddr))
             finally:
-                await self.remove_peer(peer_id)
+                await self.remove_peer(peer_id, ws)
 
         sslctx = self.get_ssl_ctx(https_server=True)
 

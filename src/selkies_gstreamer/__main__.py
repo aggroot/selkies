@@ -484,6 +484,11 @@ def main():
                         help='Enable debug logging')
     args = parser.parse_args()
 
+    # Remove stale JSON config so CLI args take precedence on fresh start
+    if os.path.exists(args.json_config):
+        os.remove(args.json_config)
+        logger.info("removed stale json config: %s", args.json_config)
+
     if os.path.exists(args.json_config):
         # Read and overlay arguments from json file
         # Note that these are explicit overrides only.
