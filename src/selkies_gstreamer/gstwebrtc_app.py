@@ -21,6 +21,7 @@
 
 import asyncio
 import base64
+import ctypes
 import json
 import logging
 import os
@@ -28,8 +29,16 @@ import re
 import sys
 import time
 
+# Direct g_object_ref via ctypes — PyGObject's .ref() is a no-op.
+# Used to prevent premature GC of borrowed GObject pointers (ice-agent).
+_libgobject = ctypes.cdll.LoadLibrary('libgobject-2.0.so.0')
+_libgobject.g_object_ref.argtypes = [ctypes.c_void_p]
+_libgobject.g_object_ref.restype = ctypes.c_void_p
+_libgobject.g_object_unref.argtypes = [ctypes.c_void_p]
+_libgobject.g_object_unref.restype = None
+
 logger = logging.getLogger("gstwebrtc_app")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 try:
     import gi
@@ -86,6 +95,7 @@ class GSTWebRTCApp:
         self.pipeline = None
         self.webrtcbin = None
         self.data_channel = None
+        self._ice_agent_ptr = None
         self.rtpgccbwe = None
         self.congestion_control = congestion_control
         self.encoder = encoder
@@ -161,10 +171,6 @@ class GSTWebRTCApp:
         self.webrtcbin = Gst.ElementFactory.make("webrtcbin", "app")
 
         # The bundle policy affects how the SDP is generated.
-        # This will ultimately determine how many tracks the browser receives.
-        # Setting this to max-compat will prioritize separate tracks for
-        # audio and video.
-        # See also: https://webrtcstandards.info/sdp-bundle/
         self.webrtcbin.set_property("bundle-policy", "max-compat")
 
         # Set default jitterbuffer latency to the minimum possible
@@ -197,17 +203,22 @@ class GSTWebRTCApp:
         # Add element to the pipeline.
         self.pipeline.add(self.webrtcbin)
 
-        # Constrain ICE agent port range
-        # Must keep reference on self until pipeline stops — GI will unref the
-        # GObject if the local goes out of scope before pipeline reaches PLAYING.
-        # Cleaned up in stop_pipeline() so rebuilds get a fresh ICE agent.
+        # Constrain ICE agent port range.
+        # get_property("ice-agent") returns a borrowed pointer — webrtcbin
+        # doesn't hold a real GObject ref, so when the Python local dies the
+        # object gets freed and ICE fails. We add one extra C-level ref via
+        # ctypes so the object survives until stop_pipeline() explicitly
+        # unrefs it before pipeline.set_state(NULL).
         if self.udp_min_port > 0 or self.udp_max_port > 0:
-            self._ice_agent_ref = self.webrtcbin.get_property("ice-agent")
+            ice_agent = self.webrtcbin.get_property("ice-agent")
+            ptr = hash(ice_agent)
+            _libgobject.g_object_ref(ptr)
+            self._ice_agent_ptr = ptr
             if self.udp_min_port > 0:
-                self._ice_agent_ref.props.min_rtp_port = self.udp_min_port
+                ice_agent.props.min_rtp_port = self.udp_min_port
                 logger.info("ICE agent min-rtp-port set to %d", self.udp_min_port)
             if self.udp_max_port > 0:
-                self._ice_agent_ref.props.max_rtp_port = self.udp_max_port
+                ice_agent.props.max_rtp_port = self.udp_max_port
                 logger.info("ICE agent max-rtp-port set to %d", self.udp_max_port)
     # [END build_webrtcbin_pipeline]
 
@@ -1780,17 +1791,18 @@ class GSTWebRTCApp:
             self.data_channel.emit('close')
             self.data_channel = None
             logger.info("data channel closed")
+        # Release the extra ICE agent ref BEFORE set_state(NULL) so the
+        # agent's UDP sockets are freed during pipeline teardown.
+        if self._ice_agent_ptr:
+            _libgobject.g_object_unref(self._ice_agent_ptr)
+            self._ice_agent_ptr = None
+            logger.info("ICE agent extra ref released")
         if self.pipeline:
             logger.info("setting pipeline state to NULL")
             self.pipeline.set_state(Gst.State.NULL)
             self.pipeline = None
             logger.info("pipeline set to state NULL")
-        if hasattr(self, '_ice_agent_ref'):
-            del self._ice_agent_ref
-        if self.webrtcbin:
-            self.webrtcbin.set_state(Gst.State.NULL)
-            self.webrtcbin = None
-            logger.info("webrtcbin set to state NULL")
+        self.webrtcbin = None
         logger.info("pipeline stopped")
 
     class PlayoutDelayExtension(GstRtp.RTPHeaderExtension):

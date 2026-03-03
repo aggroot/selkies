@@ -546,7 +546,7 @@ def main():
     async def on_signalling_error(e):
        if isinstance(e, WebRTCSignallingErrorNoPeer):
            # Waiting for peer to connect, retry in 2 seconds.
-           time.sleep(2)
+           await asyncio.sleep(2)
            await signalling.setup_call()
        else:
            logger.error("signalling error: %s", str(e))
@@ -554,7 +554,7 @@ def main():
     async def on_audio_signalling_error(e):
        if isinstance(e, WebRTCSignallingErrorNoPeer):
            # Waiting for peer to connect, retry in 2 seconds.
-           time.sleep(2)
+           await asyncio.sleep(2)
            await audio_signalling.setup_call()
        else:
            logger.error("signalling error: %s", str(e))
@@ -625,8 +625,13 @@ def main():
     audio_packetloss_percent = float(args.audio_packetloss_percent)
 
     # Create instance of app
-    app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent, public_ip=args.public_ip or None, udp_min_port=int(args.udp_min_port), udp_max_port=int(args.udp_max_port))
-    audio_app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent, public_ip=args.public_ip or None, udp_min_port=int(args.udp_min_port), udp_max_port=int(args.udp_max_port))
+    # Split the UDP port range between video and audio so their ICE agents
+    # don't compete for the same ports. Each needs at least 2 (UDP + TCP).
+    udp_min = int(args.udp_min_port)
+    udp_max = int(args.udp_max_port)
+    udp_mid = udp_min + (udp_max - udp_min + 1) // 2  # midpoint
+    app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent, public_ip=args.public_ip or None, udp_min_port=udp_min, udp_max_port=udp_mid - 1)
+    audio_app = GSTWebRTCApp(stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent, public_ip=args.public_ip or None, udp_min_port=udp_mid, udp_max_port=udp_max)
 
     # [END main_setup]
 
@@ -902,18 +907,34 @@ def main():
         loop.run_in_executor(None, lambda: rtc_file_mon.start())
         loop.run_in_executor(None, lambda: system_mon.start())
 
+        audio_task = None
+        video_bus_task = None
+        audio_bus_task = None
         while True:
             if using_webrtc_csv:
                 metrics.initialize_webrtc_csv_file(args.webrtc_statistics_dir)
-            asyncio.ensure_future(app.handle_bus_calls(), loop=loop)
-            asyncio.ensure_future(audio_app.handle_bus_calls(), loop=loop)
+
+            # Cancel previous bus handlers before creating new ones
+            if video_bus_task and not video_bus_task.done():
+                video_bus_task.cancel()
+            if audio_bus_task and not audio_bus_task.done():
+                audio_bus_task.cancel()
+            video_bus_task = asyncio.ensure_future(app.handle_bus_calls(), loop=loop)
+            audio_bus_task = asyncio.ensure_future(audio_app.handle_bus_calls(), loop=loop)
 
             loop.run_until_complete(signalling.connect())
             loop.run_until_complete(audio_signalling.connect())
 
-            # asyncio.ensure_future(signalling.start(), loop=loop)
-            asyncio.ensure_future(audio_signalling.start(), loop=loop)
+
+            audio_task = asyncio.ensure_future(audio_signalling.start(), loop=loop)
             loop.run_until_complete(signalling.start())
+            # Cancel audio signalling and wait for cleanup (removes peer 2 from signalling server)
+            if audio_task and not audio_task.done():
+                audio_task.cancel()
+                try:
+                    loop.run_until_complete(audio_task)
+                except asyncio.CancelledError:
+                    pass
 
             app.stop_pipeline()
             audio_app.stop_pipeline()
