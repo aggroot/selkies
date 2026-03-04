@@ -315,7 +315,7 @@ def set_json_app_argument(config_path, key, value):
             json.dump({}, f)
 
     # Read current config JSON
-    with open(config_path, 'w') as f:
+    with open(config_path, 'r') as f:
         json_data = json.load(f)
 
     # Set the new value for the argument
@@ -591,7 +591,7 @@ async def main():
     async def on_signalling_error(e):
         if isinstance(e, WebRTCSignallingErrorNoPeer):
             # Waiting for peer to connect, retry in 2 seconds.
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
             await signalling.setup_call()
         else:
             logger.error("signalling error: %s", str(e))
@@ -599,7 +599,7 @@ async def main():
     async def on_audio_signalling_error(e):
         if isinstance(e, WebRTCSignallingErrorNoPeer):
             # Waiting for peer to connect, retry in 2 seconds.
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
             await audio_signalling.setup_call()
         else:
             logger.error("signalling error: %s", str(e))
@@ -965,11 +965,18 @@ async def main():
         asyncio.create_task(rtc_file_mon.start())
         asyncio.create_task(system_mon.start())
         audio_task = None
+        video_bus_task = None
+        audio_bus_task = None
         while True:
             if using_webrtc_csv:
                 metrics.initialize_webrtc_csv_file(args.webrtc_statistics_dir)
-            asyncio.create_task(app.handle_bus_calls())
-            asyncio.create_task(audio_app.handle_bus_calls())
+            # Cancel previous bus handlers before creating new ones
+            if video_bus_task and not video_bus_task.done():
+                video_bus_task.cancel()
+            if audio_bus_task and not audio_bus_task.done():
+                audio_bus_task.cancel()
+            video_bus_task = asyncio.create_task(app.handle_bus_calls())
+            audio_bus_task = asyncio.create_task(audio_app.handle_bus_calls())
             await signalling.connect()
             await audio_signalling.connect()
             audio_task = asyncio.create_task(audio_signalling.start())

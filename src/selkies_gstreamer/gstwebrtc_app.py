@@ -34,8 +34,6 @@ import time
 _libgobject = ctypes.cdll.LoadLibrary('libgobject-2.0.so.0')
 _libgobject.g_object_ref.argtypes = [ctypes.c_void_p]
 _libgobject.g_object_ref.restype = ctypes.c_void_p
-_libgobject.g_object_unref.argtypes = [ctypes.c_void_p]
-_libgobject.g_object_unref.restype = None
 
 logger = logging.getLogger("gstwebrtc_app")
 logger.setLevel(logging.DEBUG)
@@ -1711,7 +1709,10 @@ class GSTWebRTCApp:
             return False
         elif t == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            logger.error("Error: %s: %s\n" % (err, debug))
+            if "SCTP association went into error state" in str(err):
+                logger.info("WebRTC data channel disconnected, reconnecting")
+            else:
+                logger.error("Error: %s: %s\n" % (err, debug))
             return False
         elif t == Gst.MessageType.STATE_CHANGED:
             if isinstance(message.src, Gst.Pipeline):
@@ -1779,6 +1780,8 @@ class GSTWebRTCApp:
             if bus is not None:
                 while await asyncio.to_thread(bus.have_pending):
                     msg = bus.pop()
+                    if msg is None:
+                        break
                     if not await asyncio.to_thread(self.bus_call, msg):
                         running = False
             await asyncio.sleep(0.1)
@@ -1789,21 +1792,13 @@ class GSTWebRTCApp:
             await asyncio.to_thread(self.data_channel.emit, 'close')
             self.data_channel = None
             logger.info("data channel closed")
-        # Release the extra ICE agent ref BEFORE set_state(NULL) so the
-        # agent's UDP sockets are freed during pipeline teardown.
-        if self._ice_agent_ptr:
-            _libgobject.g_object_unref(self._ice_agent_ptr)
-            self._ice_agent_ptr = None
-            logger.info("ICE agent extra ref released")
         if self.pipeline:
             logger.info("setting pipeline state to NULL")
             await asyncio.to_thread(self.pipeline.set_state, Gst.State.NULL)
             self.pipeline = None
             logger.info("pipeline set to state NULL")
-        if self.webrtcbin:
-            await asyncio.to_thread(self.webrtcbin.set_state, Gst.State.NULL)
-            self.webrtcbin = None
-            logger.info("webrtcbin set to state NULL")
+        self.webrtcbin = None
+        self._ice_agent_ptr = None
         logger.info("pipeline stopped")
 
     class PlayoutDelayExtension(GstRtp.RTPHeaderExtension):
