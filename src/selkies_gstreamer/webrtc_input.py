@@ -464,37 +464,53 @@ class WebRTCInput:
         except Exception as e:
             logger.warning("exception from fetching cursor image: %s" % e)
 
-        while self.cursors_running:
-            if self.xdisplay.pending_events() == 0:
-                await asyncio.sleep(0.1)
-                continue
-            event = self.xdisplay.next_event()
-            if (event.type, 0) == self.xdisplay.extension_event.DisplayCursorNotify:
-                cache_key = event.cursor_serial
-                if cache_key in self.cursor_cache:
-                    if self.cursor_debug:
-                        logger.warning(
-                            "cursor changed to cached serial: {}".format(cache_key))
-                else:
-                    try:
-                        # Request the cursor image.
-                        cursor = self.xdisplay.xfixes_get_cursor_image(
-                            screen.root)
+        try:
+            while self.cursors_running:
+                try:
+                    if self.xdisplay.pending_events() == 0:
+                        await asyncio.sleep(0.1)
+                        continue
+                except Exception as e:
+                    logger.error("cursor monitor: pending_events() failed: %s", e)
+                    break
 
-                        # Convert cursor image and cache.
-                        self.cursor_cache[cache_key] = self.cursor_to_msg(
-                            cursor, self.cursor_scale, self.cursor_size)
+                try:
+                    event = self.xdisplay.next_event()
+                except Exception as e:
+                    logger.error("cursor monitor: next_event() failed: %s", e)
+                    break
 
+                if (event.type, 0) == self.xdisplay.extension_event.DisplayCursorNotify:
+                    cache_key = event.cursor_serial
+                    if cache_key in self.cursor_cache:
                         if self.cursor_debug:
-                            logger.warning("New cursor: position={},{}, size={}x{}, length={}, xyhot={},{}, cursor_serial={}".format(
-                                cursor.x, cursor.y, cursor.width, cursor.height, len(cursor.cursor_image), cursor.xhot, cursor.yhot, cursor.cursor_serial))
+                            logger.warning(
+                                "cursor changed to cached serial: {}".format(cache_key))
+                    else:
+                        try:
+                            # Request the cursor image.
+                            cursor = self.xdisplay.xfixes_get_cursor_image(
+                                screen.root)
+
+                            # Convert cursor image and cache.
+                            self.cursor_cache[cache_key] = self.cursor_to_msg(
+                                cursor, self.cursor_scale, self.cursor_size)
+
+                            if self.cursor_debug:
+                                logger.warning("New cursor: position={},{}, size={}x{}, length={}, xyhot={},{}, cursor_serial={}".format(
+                                    cursor.x, cursor.y, cursor.width, cursor.height, len(cursor.cursor_image), cursor.xhot, cursor.yhot, cursor.cursor_serial))
+                        except Exception as e:
+                            logger.warning(
+                                "exception from fetching cursor image: %s" % e)
+
+                    try:
+                        self.on_cursor_change(self.cursor_cache.get(cache_key))
                     except Exception as e:
-                        logger.warning(
-                            "exception from fetching cursor image: %s" % e)
+                        logger.error("cursor monitor: on_cursor_change() failed: %s", e)
+        except Exception as e:
+            logger.error("cursor monitor crashed: %s", e)
 
-                self.on_cursor_change(self.cursor_cache.get(cache_key))
-
-        logger.info("cursor monitor stopped")
+        logger.warning("cursor monitor exited (cursors_running=%s)", self.cursors_running)
 
     def stop_cursor_monitor(self):
         logger.info("stopping cursor monitor")
