@@ -138,7 +138,7 @@
 <body>
   <div id="app" v-cloak>
     <v-app>
-      <v-navigation-drawer v-model="showDrawer" app fixed right temporary width="600">
+      <v-navigation-drawer v-if="!minimal" v-model="showDrawer" app fixed right temporary width="600">
         <v-container fluid grid-list-lg>
           <v-layout row wrap>
             <v-flex xs12>
@@ -384,7 +384,7 @@
 
       <canvas id="capture"></canvas>
 
-      <v-btn class="fab-container" v-on:click="showDrawer=!showDrawer" color="grey" fab dark fixed right>
+      <v-btn v-if="!minimal" class="fab-container" v-on:click="showDrawer=!showDrawer" color="grey" fab dark fixed right>
       </v-btn>
 
       <div class="loading">

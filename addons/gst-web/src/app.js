@@ -51,6 +51,7 @@ var app = new Vue({
     data() {
         return {
             appName: window.location.pathname.length > 1 ? window.location.pathname.slice(1).replace(/\/$/, '') : "",
+            minimal: new URLSearchParams(window.location.search).has('minimal'),
             videoBitRate: 8000,
             videoBitRateOptions: [
                 { text: '250 kbps', value: 250 },

@@ -126,7 +126,7 @@ class Input {
         this._allowThreshold = true;
         this._smallestDeltaY = 10000;
         this._wheelThreshold = 100;
-        this._scrollMagnitude = 10;
+        this._scrollMagnitude = parseInt(new URLSearchParams(window.location.search).get('scrollSpeed')) || 5;
 
         // variable used to scale cursor speed
         this.cursorScaleFactor = null;
