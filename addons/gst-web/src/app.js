@@ -393,6 +393,16 @@ signalling.onstatus = (message) => {
 signalling.onerror = (message) => { app.logEntries.push(applyTimestamp("[signalling] [ERROR] " + message)) };
 
 signalling.ondisconnect = () => {
+    if (signalling.state === 'replaced') {
+        console.log("signalling: session replaced by another connection");
+        app.status = 'failed';
+        app.loadingText = 'Session opened in another location';
+        videoElement.style.cursor = "auto";
+        webrtc.reset();
+        audio_signalling.state = 'replaced';
+        audio_signalling.disconnect();
+        return;
+    }
     var checkconnect = app.status == checkconnect;
     // if (app.status !== "connected") return;
     console.log("signalling disconnected");
@@ -410,6 +420,11 @@ audio_signalling.onstatus = (message) => {
 audio_signalling.onerror = (message) => { app.logEntries.push(applyTimestamp("[audio signalling] [ERROR] " + message)) };
 
 audio_signalling.ondisconnect = () => {
+    if (audio_signalling.state === 'replaced') {
+        console.log("audio signalling: session replaced by another connection");
+        audio_webrtc.reset();
+        return;
+    }
     var checkconnect = app.status == checkconnect;
     // if (app.status !== "connected") return;
     console.log("audio signalling disconnected");
@@ -537,6 +552,7 @@ function enableStatWatch() {
     }, 1000);
 }
 webrtc.onconnectionstatechange = (state) => {
+    if (signalling.state === 'replaced') return;
     videoConnected = state;
     if (videoConnected === "connected") {
         // Repeatedly emit minimum latency target
@@ -561,6 +577,7 @@ webrtc.onconnectionstatechange = (state) => {
     }
 };
 audio_webrtc.onconnectionstatechange = (state) => {
+    if (audio_signalling.state === 'replaced') return;
     audioConnected = state;
     if (audioConnected === "connected") {
         // Repeatedly emit minimum latency target

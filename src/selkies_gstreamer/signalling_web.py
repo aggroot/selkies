@@ -434,9 +434,17 @@ class WebRTCSimpleServer(object):
         if hello != 'HELLO':
             await ws.close(code=1002, reason='invalid protocol')
             raise Exception("Invalid hello from {!r}".format(raddr))
-        if not uid or uid in self.peers or uid.split() != [uid]: # no whitespace
+        if not uid or uid.split() != [uid]: # no whitespace
             await ws.close(code=1002, reason='invalid peer uid')
             raise Exception("Invalid uid {!r} from {!r}".format(uid, raddr))
+        if uid in self.peers:
+            old_ws = self.peers[uid][0]
+            logger.info("Evicting existing peer {!r} for new connection from {!r}".format(uid, raddr))
+            try:
+                await old_ws.send('ERROR session_taken')
+            except Exception:
+                pass
+            await self.remove_peer(uid)
         meta = None
         if metab64str:
             meta = json.loads(base64.b64decode(metab64str))

@@ -391,7 +391,7 @@
         <div v-if="status === 'failed'">
           <v-btn v-on:click="location.reload()" color="#E0E0E0">
             reload</v-btn>
-          <div class="loading-text">Connection failed.</div>
+          <div class="loading-text">{{ loadingText || 'Connection failed.' }}</div>
         </div>
         <div v-else>
           <scale-loader size="200px" :loading="(status !== 'connected')" color="#E0E0E0"></scale-loader>

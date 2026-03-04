@@ -196,10 +196,12 @@ class WebRTCDemoSignalling {
      * @event
      */
     _onServerError() {
+        if (this.state === 'replaced') return;
         this._setStatus("Connection error, retry in 3 seconds.");
         this.retry_count++;
         if (this._ws_conn.readyState === this._ws_conn.CLOSED) {
             setTimeout(() => {
+                if (this.state === 'replaced') return;
                 if (this.retry_count > 3) {
                     window.location.reload();
                 } else {
@@ -227,6 +229,14 @@ class WebRTCDemoSignalling {
         if (event.data === "HELLO") {
             this._setStatus("Registered with server.");
             this._setStatus("Waiting for stream.");
+            return;
+        }
+
+        if (event.data === "ERROR session_taken") {
+            this._setStatus("Session opened in another location");
+            this.state = 'replaced';
+            if (this.ondisconnect !== null) this.ondisconnect();
+            this._ws_conn.close();
             return;
         }
 
@@ -267,6 +277,7 @@ class WebRTCDemoSignalling {
      * @event
      */
     _onServerClose() {
+        if (this.state === 'replaced') return;
         if (this.state !== 'connecting') {
             this.state = 'disconnected';
             this._setError("Server closed connection.");
@@ -280,6 +291,7 @@ class WebRTCDemoSignalling {
      * server and the server (peer) to negotiate ICE candidates and media capabilities.
      */
     connect() {
+        if (this.state === 'replaced') return;
         this.state = 'connecting';
         this._setStatus("Connecting to server.");
 
