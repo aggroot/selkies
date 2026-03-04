@@ -395,8 +395,8 @@ async def main():
                         help='Header to pass TURN (D)TLS usage to TURN REST API service')
     parser.add_argument('--turn_host',
                         default=os.environ.get(
-                            'SELKIES_TURN_HOST', 'staticauth.openrelay.metered.ca'),
-                        help='TURN host when generating RTC config from shared secret or using long-term credentials, IPv6 addresses must be enclosed with square brackets such as [::1]')
+                            'SELKIES_TURN_HOST', ''),
+                        help='TURN host when generating RTC config from shared secret or using long-term credentials')
     parser.add_argument('--turn_port',
                         default=os.environ.get(
                             'SELKIES_TURN_PORT', '443'),
@@ -411,7 +411,7 @@ async def main():
                         help='Enable or disable TURN over TLS (for the TCP protocol) or TURN over DTLS (for the UDP protocol), valid TURN server certificate required')
     parser.add_argument('--turn_shared_secret',
                         default=os.environ.get(
-                            'SELKIES_TURN_SHARED_SECRET', 'openrelayprojectsecret'),
+                            'SELKIES_TURN_SHARED_SECRET', ''),
                         help='Shared TURN secret used to generate HMAC credentials, also requires --turn_host and --turn_port')
     parser.add_argument('--turn_username',
                         default=os.environ.get(
@@ -421,6 +421,15 @@ async def main():
                         default=os.environ.get(
                             'SELKIES_TURN_PASSWORD', ''),
                         help='Legacy non-HMAC TURN credential password, also requires --turn_host and --turn_port')
+    parser.add_argument('--public_ip',
+                        default=os.environ.get('SELKIES_PUBLIC_IP', ''),
+                        help='Public IP for WebRTC ICE candidates, replaces host candidates with srflx. Disables STUN on server when set.')
+    parser.add_argument('--udp_min_port',
+                        default=os.environ.get('SELKIES_UDP_MIN_PORT', '0'),
+                        help='Minimum UDP port for ICE (0 = any)')
+    parser.add_argument('--udp_max_port',
+                        default=os.environ.get('SELKIES_UDP_MAX_PORT', '0'),
+                        help='Maximum UDP port for ICE (0 = any)')
     parser.add_argument('--stun_host',
                         default=os.environ.get(
                             'SELKIES_STUN_HOST', 'stun.l.google.com'),
@@ -514,6 +523,11 @@ async def main():
                         help='Enable debug logging')
     args = parser.parse_args()
 
+    # Remove stale JSON config so CLI args take precedence on fresh start
+    if os.path.exists(args.json_config):
+        os.remove(args.json_config)
+        logger.info("removed stale json config: %s", args.json_config)
+
     if os.path.exists(args.json_config):
         # Read and overlay arguments from json file
         # Note that these are explicit overrides only.
@@ -576,16 +590,16 @@ async def main():
     # Handle errors from the signalling server
     async def on_signalling_error(e):
         if isinstance(e, WebRTCSignallingErrorNoPeer):
-            # Waiting for peer to connect, retry in 1 second.
-            await asyncio.sleep(1.0)
+            # Waiting for peer to connect, retry in 2 seconds.
+            await asyncio.sleep(2)
             await signalling.setup_call()
         else:
             logger.error("signalling error: %s", str(e))
             await app.stop_pipeline()
     async def on_audio_signalling_error(e):
         if isinstance(e, WebRTCSignallingErrorNoPeer):
-            # Waiting for peer to connect, retry in 1 second.
-            await asyncio.sleep(1.0)
+            # Waiting for peer to connect, retry in 2 seconds.
+            await asyncio.sleep(2)
             await audio_signalling.setup_call()
         else:
             logger.error("signalling error: %s", str(e))
@@ -670,8 +684,13 @@ async def main():
     # Create instance of app
     # Only use asynchronous event loops directly when synchronous functions are absolutely necessary (such as GStreamer signals)
     event_loop = asyncio.get_running_loop()
-    app = GSTWebRTCApp(event_loop, stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
-    audio_app = GSTWebRTCApp(event_loop, stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent)
+    # Split the UDP port range between video and audio so their ICE agents
+    # don't compete for the same ports. Each needs at least 2 (UDP + TCP).
+    udp_min = int(args.udp_min_port)
+    udp_max = int(args.udp_max_port)
+    udp_mid = udp_min + (udp_max - udp_min + 1) // 2  # midpoint
+    app = GSTWebRTCApp(event_loop, stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent, public_ip=args.public_ip or None, udp_min_port=udp_min, udp_max_port=udp_mid - 1)
+    audio_app = GSTWebRTCApp(event_loop, stun_servers, turn_servers, audio_channels, curr_fps, args.encoder, gpu_id, curr_video_bitrate, curr_audio_bitrate, keyframe_distance, congestion_control, video_packetloss_percent, audio_packetloss_percent, public_ip=args.public_ip or None, udp_min_port=udp_mid, udp_max_port=udp_max)
 
     # [END main_setup]
 
@@ -694,23 +713,26 @@ async def main():
     # Start the pipeline once the session is established.
     def on_session_handler(session_peer_id, meta=None):
         logger.info("starting session for peer id {} with meta: {}".format(session_peer_id, meta))
-        if str(session_peer_id) == str(peer_id):
-            if meta:
-                if enable_resize:
-                    if meta["res"]:
-                        on_resize_handler(meta["res"])
-                    if meta["scale"]:
-                        on_scaling_ratio_handler(meta["scale"])
-                else:
-                    logger.info("setting cursor to default size")
-                    set_cursor_size(16)
-            logger.info("starting video pipeline")
-            app.start_pipeline()
-        elif str(session_peer_id) == str(audio_peer_id):
-            logger.info("starting audio pipeline")
-            audio_app.start_pipeline(audio_only=True)
-        else:
-            logger.error("failed to start pipeline for peer_id: %s" % peer_id)
+        try:
+            if str(session_peer_id) == str(peer_id):
+                if meta:
+                    if enable_resize:
+                        if meta["res"]:
+                            on_resize_handler(meta["res"])
+                        if meta["scale"]:
+                            on_scaling_ratio_handler(meta["scale"])
+                    else:
+                        logger.info("setting cursor to default size")
+                        set_cursor_size(16)
+                logger.info("starting video pipeline")
+                app.start_pipeline()
+            elif str(session_peer_id) == str(audio_peer_id):
+                logger.info("starting audio pipeline")
+                audio_app.start_pipeline(audio_only=True)
+            else:
+                logger.error("failed to start pipeline for peer_id: %s" % peer_id)
+        except Exception as e:
+            logger.error("Exception in on_session_handler: %s" % e, exc_info=True)
 
     signalling.on_session = on_session_handler
     audio_signalling.on_session = on_session_handler
@@ -942,6 +964,7 @@ async def main():
         asyncio.create_task(turn_rest_mon.start())
         asyncio.create_task(rtc_file_mon.start())
         asyncio.create_task(system_mon.start())
+        audio_task = None
         while True:
             if using_webrtc_csv:
                 metrics.initialize_webrtc_csv_file(args.webrtc_statistics_dir)
@@ -949,8 +972,15 @@ async def main():
             asyncio.create_task(audio_app.handle_bus_calls())
             await signalling.connect()
             await audio_signalling.connect()
-            asyncio.create_task(audio_signalling.start())
+            audio_task = asyncio.create_task(audio_signalling.start())
             await signalling.start()
+            # Cancel audio signalling and wait for cleanup (removes peer 2 from signalling server)
+            if audio_task and not audio_task.done():
+                audio_task.cancel()
+                try:
+                    await audio_task
+                except asyncio.CancelledError:
+                    pass
             await app.stop_pipeline()
             await audio_app.stop_pipeline()
             await webrtc_input.stop_js_server()

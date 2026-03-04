@@ -311,10 +311,14 @@ class WebRTCDemo {
                     this.peerConnection.setLocalDescription(local_sdp).then(() => {
                         this._setDebug("Sending SDP answer");
                         this.signalling.sendSDP(this.peerConnection.localDescription);
+                    }).catch((e) => {
+                        console.error("setLocalDescription failed:", e);
                     });
-                }).catch(() => {
-                    this._setError("Error creating local SDP");
+                }).catch((e) => {
+                    console.error("createAnswer failed:", e);
                 });
+        }).catch((e) => {
+            console.error("setRemoteDescription failed:", e);
         });
     }
 

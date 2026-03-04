@@ -50,7 +50,7 @@ var app = new Vue({
 
     data() {
         return {
-            appName: window.location.pathname.endsWith("/") && (window.location.pathname.split("/")[1]) || "webrtc",
+            appName: window.location.pathname.length > 1 ? window.location.pathname.slice(1).replace(/\/$/, '') : "",
             videoBitRate: 8000,
             videoBitRateOptions: [
                 { text: '250 kbps', value: 250 },
@@ -372,9 +372,10 @@ if (audioElement === null) {
 var pathname = window.location.pathname;
 pathname = pathname.slice(0, pathname.lastIndexOf("/") + 1);
 var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
-var signalling = new WebRTCDemoSignalling(new URL(protocol + window.location.host + pathname + app.appName + "/signalling/"));
+var basePath = app.appName ? "/" + app.appName : "";
+var signalling = new WebRTCDemoSignalling(new URL(protocol + window.location.host + basePath + "/signalling/"));
 var webrtc = new WebRTCDemo(signalling, videoElement, 1);
-var audio_signalling = new WebRTCDemoSignalling(new URL(protocol + window.location.host + pathname + app.appName + "/signalling/"));
+var audio_signalling = new WebRTCDemoSignalling(new URL(protocol + window.location.host + basePath + "/signalling/"));
 var audio_webrtc = new WebRTCDemo(audio_signalling, audioElement, 3);
 
 // Function to add timestamp to logs.
@@ -824,22 +825,15 @@ var checkPublishing = () => {
 // checkPublishing();
 
 // Fetch RTC configuration containing STUN/TURN servers.
-fetch("./turn")
+fetch(basePath + "/turn")
     .then(function (response) {
+        if (!response.ok) throw new Error("no TURN endpoint");
         return response.json();
     })
     .then((config) => {
         // for debugging, force use of relay server.
         webrtc.forceTurn = app.turnSwitch;
         audio_webrtc.forceTurn = app.turnSwitch;
-
-        // get initial local resolution
-        app.windowResolution = webrtc.input.getWindowResolution();
-
-        if (app.scaleLocal === false) {
-            webrtc.element.style.width = app.windowResolution[0]/window.devicePixelRatio+'px';
-            webrtc.element.style.height = app.windowResolution[1]/window.devicePixelRatio+'px';
-        }
 
         if (config.iceServers.length > 1) {
             app.debugEntries.push(applyTimestamp("[app] using TURN servers: " + config.iceServers[1].urls.join(", ")));
@@ -848,6 +842,19 @@ fetch("./turn")
         }
         webrtc.rtcPeerConfig = config;
         audio_webrtc.rtcPeerConfig = config;
+    })
+    .catch(() => {
+        app.debugEntries.push(applyTimestamp("[app] no TURN endpoint, using STUN only."));
+    })
+    .finally(() => {
+        // get initial local resolution
+        app.windowResolution = webrtc.input.getWindowResolution();
+
+        if (app.scaleLocal === false) {
+            webrtc.element.style.width = app.windowResolution[0]/window.devicePixelRatio+'px';
+            webrtc.element.style.height = app.windowResolution[1]/window.devicePixelRatio+'px';
+        }
+
         webrtc.connect();
         audio_webrtc.connect();
     });

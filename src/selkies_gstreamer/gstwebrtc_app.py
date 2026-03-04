@@ -21,6 +21,7 @@
 
 import asyncio
 import base64
+import ctypes
 import json
 import logging
 import os
@@ -28,8 +29,16 @@ import re
 import sys
 import time
 
+# Direct g_object_ref via ctypes — PyGObject's .ref() is a no-op.
+# Used to prevent premature GC of borrowed GObject pointers (ice-agent).
+_libgobject = ctypes.cdll.LoadLibrary('libgobject-2.0.so.0')
+_libgobject.g_object_ref.argtypes = [ctypes.c_void_p]
+_libgobject.g_object_ref.restype = ctypes.c_void_p
+_libgobject.g_object_unref.argtypes = [ctypes.c_void_p]
+_libgobject.g_object_unref.restype = None
+
 logger = logging.getLogger("gstwebrtc_app")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 try:
     import gi
@@ -39,8 +48,8 @@ try:
     gi.require_version('GstSdp', "1.0")
     gi.require_version('GstWebRTC', "1.0")
     from gi.repository import GLib, Gst, GstRtp, GstSdp, GstWebRTC
-    fract = Gst.Fraction(60, 1)
-    del fract
+    # Verify GStreamer is functional (Gst.init is called later in __main__)
+    Gst.init(None)
 except Exception as e:
     msg = """ERROR: could not find working GStreamer-Python installation.
 
@@ -65,7 +74,7 @@ class GSTWebRTCAppError(Exception):
     pass
 
 class GSTWebRTCApp:
-    def __init__(self, async_event_loop, stun_servers=None, turn_servers=None, audio_channels=2, framerate=30, encoder=None, gpu_id=0, video_bitrate=2000, audio_bitrate=96000, keyframe_distance=-1.0, congestion_control=False, video_packetloss_percent=0.0, audio_packetloss_percent=0.0):
+    def __init__(self, async_event_loop, stun_servers=None, turn_servers=None, audio_channels=2, framerate=30, encoder=None, gpu_id=0, video_bitrate=2000, audio_bitrate=96000, keyframe_distance=-1.0, congestion_control=False, video_packetloss_percent=0.0, audio_packetloss_percent=0.0, public_ip=None, udp_min_port=0, udp_max_port=0):
         """Initialize GStreamer WebRTC app.
 
         Initializes GObjects and checks for required plugins.
@@ -80,10 +89,14 @@ class GSTWebRTCApp:
         self.async_event_loop = async_event_loop
         self.stun_servers = stun_servers
         self.turn_servers = turn_servers
+        self.public_ip = public_ip
+        self.udp_min_port = udp_min_port
+        self.udp_max_port = udp_max_port
         self.audio_channels = audio_channels
         self.pipeline = None
         self.webrtcbin = None
         self.data_channel = None
+        self._ice_agent_ptr = None
         self.rtpgccbwe = None
         self.congestion_control = congestion_control
         self.encoder = encoder
@@ -159,10 +172,6 @@ class GSTWebRTCApp:
         self.webrtcbin = Gst.ElementFactory.make("webrtcbin", "app")
 
         # The bundle policy affects how the SDP is generated.
-        # This will ultimately determine how many tracks the browser receives.
-        # Setting this to max-compat will prioritize separate tracks for
-        # audio and video.
-        # See also: https://webrtcstandards.info/sdp-bundle/
         self.webrtcbin.set_property("bundle-policy", "max-compat")
 
         # Set default jitterbuffer latency to the minimum possible
@@ -177,9 +186,9 @@ class GSTWebRTCApp:
         self.webrtcbin.connect('on-ice-candidate', lambda webrtcbin, mlineindex,
                                candidate: self.__send_ice(webrtcbin, mlineindex, candidate))
 
-        # Add STUN server
+        # Add STUN server (skip when public_ip is set — we inject our own srflx candidates)
         # TODO: figure out how to add more than one STUN server.
-        if self.stun_servers:
+        if self.stun_servers and not self.public_ip:
             logger.info("updating STUN server")
             self.webrtcbin.set_property("stun-server", self.stun_servers[0])
 
@@ -194,6 +203,24 @@ class GSTWebRTCApp:
 
         # Add element to the pipeline.
         self.pipeline.add(self.webrtcbin)
+
+        # Constrain ICE agent port range.
+        # get_property("ice-agent") returns a borrowed pointer — webrtcbin
+        # doesn't hold a real GObject ref, so when the Python local dies the
+        # object gets freed and ICE fails. We add one extra C-level ref via
+        # ctypes so the object survives until stop_pipeline() explicitly
+        # unrefs it before pipeline.set_state(NULL).
+        if self.udp_min_port > 0 or self.udp_max_port > 0:
+            ice_agent = self.webrtcbin.get_property("ice-agent")
+            ptr = hash(ice_agent)
+            _libgobject.g_object_ref(ptr)
+            self._ice_agent_ptr = ptr
+            if self.udp_min_port > 0:
+                ice_agent.props.min_rtp_port = self.udp_min_port
+                logger.info("ICE agent min-rtp-port set to %d", self.udp_min_port)
+            if self.udp_max_port > 0:
+                ice_agent.props.max_rtp_port = self.udp_max_port
+                logger.info("ICE agent max-rtp-port set to %d", self.udp_max_port)
     # [END build_webrtcbin_pipeline]
 
     # [START build_video_pipeline]
@@ -248,7 +275,7 @@ class GSTWebRTCApp:
         # The higher the FPS, the lower the latency so this parameter is one
         # way to set the overall target latency of the pipeline though keep in
         # mind that the pipeline may not always perform at the full 60 FPS.
-        self.ximagesrc_caps.set_value("framerate", Gst.Fraction(self.framerate, 1))
+        self.ximagesrc_caps = Gst.caps_from_string("video/x-raw,framerate={}/1".format(self.framerate))
 
         # Create a capability filter for the ximagesrc_caps
         self.ximagesrc_capsfilter = Gst.ElementFactory.make("capsfilter")
@@ -1261,8 +1288,7 @@ class GSTWebRTCApp:
             else:
                 logger.warning("setting keyframe interval (GOP size) not supported with encoder: %s" % self.encoder)
 
-            self.ximagesrc_caps = Gst.caps_from_string("video/x-raw")
-            self.ximagesrc_caps.set_value("framerate", Gst.Fraction(self.framerate, 1))
+            self.ximagesrc_caps = Gst.caps_from_string("video/x-raw,framerate={}/1".format(self.framerate))
             self.ximagesrc_capsfilter.set_property("caps", self.ximagesrc_caps)
             logger.info("framerate set to: %d" % framerate)
 
@@ -1649,7 +1675,34 @@ class GSTWebRTCApp:
             candidate {string} -- ice candidate string
         """
         logger.debug("received ICE candidate: %d %s", mlineindex, candidate)
-        asyncio.run(self.on_ice(mlineindex, candidate))
+
+        if self.public_ip and "typ host" in candidate:
+            # Replace host candidates with synthetic srflx using public IP
+            parts = candidate.split()
+            if len(parts) >= 8:
+                orig_addr = parts[4]
+                orig_port = parts[5]
+                orig_priority = int(parts[3])
+                # Compute srflx priority: shift type preference from host(126) to srflx(100)
+                srflx_priority = orig_priority - (26 << 24)  # 26 * 16777216 = 436207616
+                if srflx_priority < 0:
+                    srflx_priority = 1
+                # Build srflx candidate
+                srflx = "candidate:{} {} {} {} {} {} typ srflx raddr {} rport {}".format(
+                    parts[0].split(":")[1],  # foundation
+                    parts[1],  # component-id
+                    parts[2],  # transport (UDP)
+                    srflx_priority,
+                    self.public_ip,
+                    orig_port,  # same port (Docker maps it)
+                    orig_addr,
+                    orig_port
+                )
+                logger.info("injecting srflx candidate: %s", srflx)
+                asyncio.run_coroutine_threadsafe(self.on_ice(mlineindex, srflx), loop=self.async_event_loop)
+                return  # suppress original host candidate
+
+        asyncio.run_coroutine_threadsafe(self.on_ice(mlineindex, candidate), loop=self.async_event_loop)
 
     def bus_call(self, message):
         t = message.type
@@ -1682,26 +1735,32 @@ class GSTWebRTCApp:
         self.pipeline = Gst.Pipeline.new()
 
         # Construct the webrtcbin pipeline
+        logger.info("building webrtcbin pipeline")
         self.build_webrtcbin_pipeline(audio_only)
+        logger.info("webrtcbin pipeline built")
 
         if audio_only:
             self.build_audio_pipeline()
         else:
+            logger.info("building video pipeline")
             self.build_video_pipeline()
+            logger.info("video pipeline built")
 
         # Advance the state of the pipeline to PLAYING.
+        logger.info("setting pipeline state to PLAYING")
         res = self.pipeline.set_state(Gst.State.PLAYING)
-        if res != Gst.StateChangeReturn.SUCCESS:
+        logger.info("pipeline state change result: %s" % res)
+        if res == Gst.StateChangeReturn.FAILURE:
             raise GSTWebRTCAppError(
                 "Failed to transition pipeline to PLAYING: %s" % res)
 
         if not audio_only:
             # Create the data channel, this has to be done after the pipeline is PLAYING.
-            options = Gst.Structure("application/data-channel")
-            options.set_value("ordered", True)
-            options.set_value("priority", "high")
-            options.set_value("max-retransmits", 0)
-            self.data_channel = self.webrtcbin.emit('create-data-channel', "input", options)
+            logger.info("creating data channel")
+            # GStreamer 1.26: Gst.Structure() creates immutable struct, use from_string
+            options, _ = Gst.Structure.from_string("application/data-channel,ordered=(boolean)true,max-retransmits=(int)0")
+            self.data_channel = self.webrtcbin.emit(
+                'create-data-channel', "input", options)
             self.data_channel.connect('on-open', lambda _: self.on_data_open())
             self.data_channel.connect('on-close', lambda _: self.on_data_close())
             self.data_channel.connect('on-error', lambda _: self.on_data_error())
@@ -1730,6 +1789,12 @@ class GSTWebRTCApp:
             await asyncio.to_thread(self.data_channel.emit, 'close')
             self.data_channel = None
             logger.info("data channel closed")
+        # Release the extra ICE agent ref BEFORE set_state(NULL) so the
+        # agent's UDP sockets are freed during pipeline teardown.
+        if self._ice_agent_ptr:
+            _libgobject.g_object_unref(self._ice_agent_ptr)
+            self._ice_agent_ptr = None
+            logger.info("ICE agent extra ref released")
         if self.pipeline:
             logger.info("setting pipeline state to NULL")
             await asyncio.to_thread(self.pipeline.set_state, Gst.State.NULL)

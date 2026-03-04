@@ -291,25 +291,29 @@ class WebRTCSimpleServer(object):
                     del self.peers[other_id]
                     await wso.close()
 
-    async def cleanup_room(self, uid, room_id):
-        room_peers = self.rooms[room_id]
-        if uid not in room_peers:
-            return
-        room_peers.remove(uid)
-        for pid in room_peers:
-            wsp, paddr, _, _ = self.peers[pid]
-            msg = 'ROOM_PEER_LEFT {}'.format(uid)
-            logger.info('room {}: {} -> {}: {}'.format(room_id, uid, pid, msg))
-            await wsp.send(msg)
+    # async def cleanup_room(self, uid, room_id):
+    #     room_peers = self.rooms[room_id]
+    #     if uid not in room_peers:
+    #         return
+    #     room_peers.remove(uid)
+    #     for pid in room_peers:
+    #         wsp, paddr, _, _ = self.peers[pid]
+    #         msg = 'ROOM_PEER_LEFT {}'.format(uid)
+    #         logger.info('room {}: {} -> {}: {}'.format(room_id, uid, pid, msg))
+    #         await wsp.send(msg)
 
-    async def remove_peer(self, uid):
+    async def remove_peer(self, uid, ws=None):
         await self.cleanup_session(uid)
         if uid in self.peers:
-            ws, raddr, status, _ = self.peers[uid]
-            if status and status != 'session':
-                await self.cleanup_room(uid, status)
+            current_ws, raddr, status, _ = self.peers[uid]
+            # Skip removal if a new connection already replaced this peer
+            if ws is not None and current_ws is not ws:
+                logger.info("Skipping stale remove_peer for {!r} (replaced by new connection)".format(uid))
+                return
+            # if status and status != 'session':
+            #     await self.cleanup_room(uid, status)
             del self.peers[uid]
-            await ws.close()
+            await current_ws.close()
             logger.info("Disconnected from peer {!r} at {!r}".format(uid, raddr))
 
     ############### Handler functions ###############
@@ -333,34 +337,34 @@ class WebRTCSimpleServer(object):
                     assert(status == 'session')
                     logger.info("{} -> {}: {}".format(uid, other_id, msg))
                     await wso.send(msg)
-                # We're in a room, accept room-specific commands
-                elif peer_status:
-                    # ROOM_PEER_MSG peer_id MSG
-                    if msg.startswith('ROOM_PEER_MSG'):
-                        _, other_id, msg = msg.split(maxsplit=2)
-                        if other_id not in self.peers:
-                            await ws.send('ERROR peer {!r} not found'
-                                          ''.format(other_id))
-                            continue
-                        wso, oaddr, status, _ = self.peers[other_id]
-                        if status != room_id:
-                            await ws.send('ERROR peer {!r} is not in the room'
-                                          ''.format(other_id))
-                            continue
-                        msg = 'ROOM_PEER_MSG {} {}'.format(uid, msg)
-                        logger.info('room {}: {} -> {}: {}'.format(room_id, uid, other_id, msg))
-                        await wso.send(msg)
-                    # elif msg == 'ROOM_PEER_LIST':
-                    #     room_id = self.peers[peer_id][2]
-                    #     room_peers = ' '.join([pid for pid in self.rooms[room_id] if pid != peer_id])
-                    #     msg = 'ROOM_PEER_LIST {}'.format(room_peers)
-                    #     logger.info('room {}: -> {}: {}'.format(room_id, uid, msg))
-                    #     await ws.send(msg)
-                    else:
-                        await ws.send('ERROR invalid msg, already in room')
-                        continue
-                else:
-                    raise AssertionError('Unknown peer status {!r}'.format(peer_status))
+                # # We're in a room, accept room-specific commands
+                # elif peer_status:
+                #     # ROOM_PEER_MSG peer_id MSG
+                #     if msg.startswith('ROOM_PEER_MSG'):
+                #         _, other_id, msg = msg.split(maxsplit=2)
+                #         if other_id not in self.peers:
+                #             await ws.send('ERROR peer {!r} not found'
+                #                           ''.format(other_id))
+                #             continue
+                #         wso, oaddr, status, _ = self.peers[other_id]
+                #         if status != room_id:
+                #             await ws.send('ERROR peer {!r} is not in the room'
+                #                           ''.format(other_id))
+                #             continue
+                #         msg = 'ROOM_PEER_MSG {} {}'.format(uid, msg)
+                #         logger.info('room {}: {} -> {}: {}'.format(room_id, uid, other_id, msg))
+                #         await wso.send(msg)
+                #     elif msg == 'ROOM_PEER_LIST':
+                #         room_id = self.peers[peer_id][2]
+                #         room_peers = ' '.join([pid for pid in self.rooms[room_id] if pid != peer_id])
+                #         msg = 'ROOM_PEER_LIST {}'.format(room_peers)
+                #         logger.info('room {}: -> {}: {}'.format(room_id, uid, msg))
+                #         await ws.send(msg)
+                #     else:
+                #         await ws.send('ERROR invalid msg, already in room')
+                #         continue
+                # else:
+                #     raise AssertionError('Unknown peer status {!r}'.format(peer_status))
             # Requested a session with a specific peer
             elif msg.startswith('SESSION'):
                 logger.info("{!r} command {!r}".format(uid, msg))
@@ -385,33 +389,33 @@ class WebRTCSimpleServer(object):
                 self.sessions[uid] = callee_id
                 self.peers[callee_id][2] = 'session'
                 self.sessions[callee_id] = uid
-            # Requested joining or creation of a room
-            elif msg.startswith('ROOM'):
-                logger.info('{!r} command {!r}'.format(uid, msg))
-                _, room_id = msg.split(maxsplit=1)
-                # Room name cannot be 'session', empty, or contain whitespace
-                if room_id == 'session' or room_id.split() != [room_id]:
-                    await ws.send('ERROR invalid room id {!r}'.format(room_id))
-                    continue
-                if room_id in self.rooms:
-                    if uid in self.rooms[room_id]:
-                        raise AssertionError('How did we accept a ROOM command '
-                                             'despite already being in a room?')
-                else:
-                    # Create room if required
-                    self.rooms[room_id] = set()
-                room_peers = ' '.join([pid for pid in self.rooms[room_id]])
-                await ws.send('ROOM_OK {}'.format(room_peers))
-                # Enter room
-                self.peers[uid][2] = peer_status = room_id
-                self.rooms[room_id].add(uid)
-                for pid in self.rooms[room_id]:
-                    if pid == uid:
-                        continue
-                    wsp, paddr, _, _ = self.peers[pid]
-                    msg = 'ROOM_PEER_JOINED {}'.format(uid)
-                    logger.info('room {}: {} -> {}: {}'.format(room_id, uid, pid, msg))
-                    await wsp.send(msg)
+            # # Requested joining or creation of a room
+            # elif msg.startswith('ROOM'):
+            #     logger.info('{!r} command {!r}'.format(uid, msg))
+            #     _, room_id = msg.split(maxsplit=1)
+            #     # Room name cannot be 'session', empty, or contain whitespace
+            #     if room_id == 'session' or room_id.split() != [room_id]:
+            #         await ws.send('ERROR invalid room id {!r}'.format(room_id))
+            #         continue
+            #     if room_id in self.rooms:
+            #         if uid in self.rooms[room_id]:
+            #             raise AssertionError('How did we accept a ROOM command '
+            #                                  'despite already being in a room?')
+            #     else:
+            #         # Create room if required
+            #         self.rooms[room_id] = set()
+            #     room_peers = ' '.join([pid for pid in self.rooms[room_id]])
+            #     await ws.send('ROOM_OK {}'.format(room_peers))
+            #     # Enter room
+            #     self.peers[uid][2] = peer_status = room_id
+            #     self.rooms[room_id].add(uid)
+            #     for pid in self.rooms[room_id]:
+            #         if pid == uid:
+            #             continue
+            #         wsp, paddr, _, _ = self.peers[pid]
+            #         msg = 'ROOM_PEER_JOINED {}'.format(uid)
+            #         logger.info('room {}: {} -> {}: {}'.format(room_id, uid, pid, msg))
+            #         await wsp.send(msg)
             else:
                 logger.info('Ignoring unknown message {!r} from {!r}'.format(msg, uid))
 
@@ -475,7 +479,7 @@ class WebRTCSimpleServer(object):
             except websockets.exceptions.ConnectionClosed:
                 logger.info("Connection to peer {!r} closed, exiting handler".format(raddr))
             finally:
-                await self.remove_peer(peer_id)
+                await self.remove_peer(peer_id, ws)
 
         # Initial cache of web_root files
         await asyncio.gather(*[self.cache_file(os.path.realpath(f)) for f in pathlib.Path(self.web_root).rglob('*.*')])
