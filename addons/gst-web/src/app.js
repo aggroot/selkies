@@ -404,8 +404,7 @@ signalling.ondisconnect = () => {
         audio_signalling.disconnect();
         return;
     }
-    var checkconnect = app.status == checkconnect;
-    // if (app.status !== "connected") return;
+    var checkconnect = app.status === 'checkconnect';
     console.log("signalling disconnected");
     app.status = 'connecting';
     videoElement.style.cursor = "auto";
@@ -426,8 +425,7 @@ audio_signalling.ondisconnect = () => {
         audio_webrtc.reset();
         return;
     }
-    var checkconnect = app.status == checkconnect;
-    // if (app.status !== "connected") return;
+    var checkconnect = app.status === 'checkconnect';
     console.log("audio signalling disconnected");
     app.status = 'connecting';
     videoElement.style.cursor = "auto";

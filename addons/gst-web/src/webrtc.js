@@ -750,18 +750,13 @@ class WebRTCDemo {
         // Clear cursor cache.
         this.cursor_cache = new Map();
 
-        var signalState = this.peerConnection.signalingState;
         if (this._send_channel !== null && this._send_channel.readyState === "open") {
             this._send_channel.close();
         }
         if (this.peerConnection !== null) this.peerConnection.close();
-        if (signalState !== "stable") {
-            setTimeout(() => {
-                this.connect();
-            }, 3000);
-        } else {
+        setTimeout(() => {
             this.connect();
-        }
+        }, 3000);
     }
 
     capture_setup() {
